@@ -106,6 +106,27 @@ Hi, I tried the new reporting feature but it doesn't seem to export to CSV corre
 Love the product! When you get a chance, it would be nice to have a dark mode option. No rush — just a suggestion.
 ```
 
+## Deploy
+
+The app can be deployed to **Vercel** or **Netlify**. The repo includes `vercel.json` and `netlify.toml` so client-side routes work correctly.
+
+### Vercel
+
+1. Push the repo to GitHub (if not already).
+2. Go to [vercel.com](https://vercel.com) → **Add New Project** → import your repo.
+3. Set **Environment Variable**: `VITE_ANTHROPIC_API_KEY` = your Anthropic API key (e.g. `sk-ant-...`).
+4. Deploy. The build runs `npm run build` and serves the `dist` folder.
+
+### Netlify
+
+1. Push the repo to GitHub (if not already).
+2. Go to [netlify.com](https://netlify.com) → **Add new site** → **Import from Git** → choose repo.
+3. Build command: `npm run build`, Publish directory: `dist` (pre-filled by `netlify.toml`).
+4. In **Site settings** → **Environment variables**, add `VITE_ANTHROPIC_API_KEY` = your Anthropic API key.
+5. Deploy.
+
+**Note:** The API key is baked into the client bundle at build time. For production, use a backend proxy so the key is never exposed in the browser (see Security Note below).
+
 ## Security Note
 
 This application uses `dangerouslyAllowBrowser: true` for local development only. In production, API calls should be proxied through a secure backend server — never expose API keys in the browser.
