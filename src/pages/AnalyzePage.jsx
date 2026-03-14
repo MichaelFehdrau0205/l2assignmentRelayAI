@@ -1,8 +1,14 @@
 import { useState, useEffect } from 'react'
-import ReactMarkdown from 'react-markdown'
 import { categorizeMessage } from '../utils/llmHelper'
-import { calculateUrgency } from '../utils/urgencyScorer'
 import { getRecommendedAction } from '../utils/templates'
+
+// Urgency badge colours — now includes Critical
+const urgencyStyles = {
+  Critical: 'bg-red-600 text-white',
+  High:     'bg-red-200 text-red-900',
+  Medium:   'bg-yellow-200 text-yellow-900',
+  Low:      'bg-green-200 text-green-900',
+}
 
 function AnalyzePage() {
   const [message, setMessage] = useState('')
@@ -10,7 +16,6 @@ function AnalyzePage() {
   const [isLoading, setIsLoading] = useState(false)
 
   useEffect(() => {
-    // Check for example message from home page
     const exampleMessage = localStorage.getItem('exampleMessage')
     if (exampleMessage) {
       setMessage(exampleMessage)
@@ -26,29 +31,24 @@ function AnalyzePage() {
 
     setIsLoading(true)
     setResults(null)
-    
+
     try {
-      // Run categorization (LLM call)
-      const { category, reasoning } = await categorizeMessage(message)
-      
-      // Calculate urgency (rule-based)
-      const urgency = calculateUrgency(message)
-      
-      // Get recommended action (template-based)
-      const recommendedAction = getRecommendedAction(category)
-      
+      // Single structured LLM call — returns category, urgency, routing_team,
+      // reasoning, urgency_reason, routing_reason, suggested_reply, confidence
+      const analysis = await categorizeMessage(message)
+
+      // Template-based recommended action uses both category AND urgency (fix #3)
+      const recommendedAction = getRecommendedAction(analysis.category, analysis.urgency)
+
       const analysisResult = {
         message,
-        category,
-        urgency,
+        ...analysis,
         recommendedAction,
-        reasoning,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
       }
 
       setResults(analysisResult)
 
-      // Save to history
       const history = JSON.parse(localStorage.getItem('triageHistory') || '[]')
       history.push(analysisResult)
       localStorage.setItem('triageHistory', JSON.stringify(history))
@@ -71,10 +71,9 @@ function AnalyzePage() {
         <div className="bg-white rounded-lg shadow-md p-6 mb-6">
           <h1 className="text-2xl font-bold text-gray-900 mb-2">Analyze Customer Message</h1>
           <p className="text-gray-600 mb-6">
-            Paste a customer support message below to automatically categorize and prioritize.
+            Paste a customer support message below to automatically categorize, prioritize, and route.
           </p>
 
-          {/* Input Section */}
           <div className="mb-4">
             <label className="block text-sm font-semibold text-gray-700 mb-2">
               Customer Message
@@ -86,12 +85,9 @@ function AnalyzePage() {
               className="w-full border border-gray-300 rounded-lg p-3 h-40 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
               disabled={isLoading}
             />
-            <div className="text-sm text-gray-500 mt-1">
-              {message.length} characters
-            </div>
+            <div className="text-sm text-gray-500 mt-1">{message.length} characters</div>
           </div>
 
-          {/* Action Buttons */}
           <div className="flex space-x-3">
             <button
               onClick={handleAnalyze}
@@ -108,7 +104,7 @@ function AnalyzePage() {
                     <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
                     <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
                   </svg>
-                  Analyzing...
+                  Analyzing with Claude...
                 </span>
               ) : (
                 'Analyze Message'
@@ -124,59 +120,133 @@ function AnalyzePage() {
           </div>
         </div>
 
-        {/* Results Section */}
         {results && (
-          <div className="bg-white rounded-lg shadow-md p-6">
-            <h2 className="text-xl font-bold text-gray-900 mb-4">Analysis Results</h2>
-            
-            <div className="space-y-4">
+          <div className="bg-white rounded-lg shadow-md p-6 space-y-5">
+            <h2 className="text-xl font-bold text-gray-900">Analysis Results</h2>
+
+            {/* Category + Urgency + Routing row */}
+            <div className="grid grid-cols-3 gap-4">
               <div>
-                <div className="text-sm font-semibold text-gray-600 mb-1">Category</div>
-                <div className="inline-block bg-blue-100 text-blue-800 px-4 py-2 rounded-lg font-semibold">
+                <div className="text-xs font-semibold text-gray-500 uppercase mb-1">Category</div>
+                <span className="inline-block bg-blue-100 text-blue-800 px-3 py-1 rounded-full font-semibold text-sm">
                   {results.category}
-                </div>
+                </span>
               </div>
-
               <div>
-                <div className="text-sm font-semibold text-gray-600 mb-1">Urgency Level</div>
-                <div className={`inline-block px-4 py-2 rounded-lg font-semibold ${
-                  results.urgency === 'High' ? 'bg-red-200 text-red-900' :
-                  results.urgency === 'Medium' ? 'bg-yellow-200 text-yellow-900' :
-                  'bg-green-200 text-green-900'
-                }`}>
+                <div className="text-xs font-semibold text-gray-500 uppercase mb-1">Urgency</div>
+                <span className={`inline-block px-3 py-1 rounded-full font-semibold text-sm ${urgencyStyles[results.urgency] || urgencyStyles.Medium}`}>
                   {results.urgency}
-                </div>
+                </span>
               </div>
-
               <div>
-                <div className="text-sm font-semibold text-gray-600 mb-1">Recommended Action</div>
-                <div className="bg-purple-50 border border-purple-200 rounded-lg p-4">
-                  <p className="text-gray-800">{results.recommendedAction}</p>
-                </div>
-              </div>
-
-              <div>
-                <div className="text-sm font-semibold text-gray-600 mb-1">AI Reasoning</div>
-                <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
-                  <div className="prose prose-sm max-w-none text-gray-700">
-                    <ReactMarkdown>
-                      {results.reasoning}
-                    </ReactMarkdown>
-                  </div>
-                </div>
+                <div className="text-xs font-semibold text-gray-500 uppercase mb-1">Route To</div>
+                <span className="inline-block bg-gray-100 text-gray-800 px-3 py-1 rounded-full font-semibold text-sm">
+                  {results.routing_team}
+                </span>
               </div>
             </div>
 
-            <div className="mt-6 pt-4 border-t border-gray-200">
+            {/* Confidence */}
+            {results.confidence !== undefined && (
+              <div>
+                <div className="text-xs font-semibold text-gray-500 uppercase mb-1">
+                  AI Confidence — {Math.round(results.confidence * 100)}%
+                </div>
+                <div className="w-full bg-gray-200 rounded-full h-2">
+                  <div
+                    className="bg-blue-500 h-2 rounded-full"
+                    style={{ width: `${Math.round(results.confidence * 100)}%` }}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Suggested Reply */}
+            {results.suggested_reply && (
+              <div>
+                <div className="text-sm font-semibold text-gray-700 mb-2">Suggested Reply Draft</div>
+                <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+                  <p className="text-gray-800 whitespace-pre-wrap text-sm">{results.suggested_reply}</p>
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(results.suggested_reply)
+                      alert('Reply draft copied!')
+                    }}
+                    className="mt-2 text-xs text-green-700 hover:underline"
+                  >
+                    Copy reply
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Recommended Action */}
+            <div>
+              <div className="text-sm font-semibold text-gray-700 mb-2">Recommended Agent Action</div>
+              <div className="bg-purple-50 border border-purple-200 rounded-lg p-4">
+                <p className="text-gray-800 text-sm">{results.recommendedAction}</p>
+              </div>
+            </div>
+
+            {/* AI Reasoning */}
+            <div>
+              <div className="text-sm font-semibold text-gray-700 mb-2">AI Reasoning</div>
+              <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 space-y-2 text-sm text-gray-700">
+                {results.reasoning && <p><span className="font-semibold">Category:</span> {results.reasoning}</p>}
+                {results.urgency_reason && <p><span className="font-semibold">Urgency:</span> {results.urgency_reason}</p>}
+                {results.routing_reason && <p><span className="font-semibold">Routing:</span> {results.routing_reason}</p>}
+              </div>
+            </div>
+
+            {/* Urgency Signals */}
+            {results.urgency_signals && (
+              <div>
+                <div className="text-sm font-semibold text-gray-700 mb-2">Urgency Signals Detected</div>
+                <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 text-sm">
+                  <div className="flex flex-wrap gap-2 mb-2">
+                    <span className={`px-2 py-1 rounded text-xs font-medium ${
+                      results.urgency_signals.tone === 'panicked' || results.urgency_signals.tone === 'angry' || results.urgency_signals.tone === 'frustrated'
+                        ? 'bg-red-100 text-red-800'
+                        : 'bg-gray-100 text-gray-700'
+                    }`}>
+                      Tone: {results.urgency_signals.tone}
+                    </span>
+                    <span className={`px-2 py-1 rounded text-xs font-medium ${
+                      results.urgency_signals.business_impact_mentioned ? 'bg-orange-100 text-orange-800' : 'bg-gray-100 text-gray-700'
+                    }`}>
+                      Business impact: {results.urgency_signals.business_impact_mentioned ? 'Yes' : 'No'}
+                    </span>
+                  </div>
+                  {results.urgency_signals.critical_keywords_found?.length > 0 && (
+                    <div className="flex flex-wrap gap-1">
+                      {results.urgency_signals.critical_keywords_found.map((kw, i) => (
+                        <span key={i} className="bg-red-100 text-red-700 px-2 py-0.5 rounded text-xs font-mono">
+                          {kw}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            <div className="pt-4 border-t border-gray-200">
               <button
                 onClick={() => {
-                  const text = `Category: ${results.category}\nUrgency: ${results.urgency}\nRecommendation: ${results.recommendedAction}\n\nReasoning: ${results.reasoning}`
+                  const text = [
+                    `Category: ${results.category}`,
+                    `Urgency: ${results.urgency}`,
+                    `Route To: ${results.routing_team}`,
+                    `\nRecommended Action: ${results.recommendedAction}`,
+                    results.suggested_reply ? `\nSuggested Reply:\n${results.suggested_reply}` : '',
+                    `\nReasoning: ${results.reasoning}`,
+                  ].filter(Boolean).join('\n')
                   navigator.clipboard.writeText(text)
                   alert('Results copied to clipboard!')
                 }}
-                className="bg-gray-100 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-200 font-semibold"
+                className="bg-gray-100 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-200 font-semibold text-sm"
               >
-                📋 Copy Results
+                Copy Full Results
               </button>
             </div>
           </div>

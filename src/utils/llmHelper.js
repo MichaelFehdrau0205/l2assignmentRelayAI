@@ -1,165 +1,168 @@
-import Groq from 'groq-sdk';
+import Anthropic from '@anthropic-ai/sdk';
+import { urgencyFallback } from './urgencyScorer';
 
 /**
- * LLM Helper for categorizing customer support messages
- * Using Groq API for AI-powered categorization
+ * LLM Helper for customer support triage
+ * Uses a single structured Claude call returning JSON with category, urgency,
+ * routing team, reasoning, and a ready-to-send reply draft.
+ *
+ * FIX #1: Replaced zero-instruction Groq prompt + fragile keyword extraction
+ *         with a single Claude call that returns structured JSON directly.
+ *         The old code: sent the raw ticket as-is, then searched the AI's
+ *         freeform reply for the word "billing" — so "this is NOT a billing
+ *         issue" would still be tagged Billing. Now Claude is told exactly
+ *         what to return and we parse it as JSON.
  */
 
-// Initialize Groq client
-const groq = new Groq({
-  apiKey: import.meta.env.VITE_GROQ_API_KEY,
-  dangerouslyAllowBrowser: true // Required for browser-based calls (not recommended for production!)
+const client = new Anthropic({
+  apiKey: import.meta.env.VITE_ANTHROPIC_API_KEY,
+  dangerouslyAllowBrowser: true, // Required for browser-based calls
 });
 
+const ANALYSIS_PROMPT = `You are a customer support ticket analyzer for Relay AI, a customer operations platform. Analyze the ticket below and respond with ONLY valid JSON — no markdown, no explanation, no extra text.
+
+Ticket:
+<ticket>
+{ticket_text}
+</ticket>
+
+Metadata:
+- Submitted: {submission_time}
+- Day of week: {day_of_week}
+- Is weekend: {is_weekend}
+
+Return this exact JSON structure:
+{
+  "category": "<one of: Billing, Technical, Feature Request, Account, General>",
+  "urgency": "<one of: Critical, High, Medium, Low>",
+  "routing_team": "<one of: billing-team, tier2-engineering, tier1-support, product-team, general-support>",
+  "confidence": <0.0 to 1.0>,
+  "reasoning": {
+    "category_reason": "<why this category>",
+    "urgency_reason": "<why this urgency — cite specific words/phrases from ticket>",
+    "routing_reason": "<why this team>"
+  },
+  "suggested_reply": "<a complete, empathetic reply draft the agent can send immediately>",
+  "urgency_signals": {
+    "critical_keywords_found": ["<list any: down, outage, breach, data loss, urgent, emergency, etc.>"],
+    "tone": "<one of: panicked, frustrated, neutral, polite, angry>",
+    "business_impact_mentioned": <true or false>
+  }
+}
+
+Urgency guidelines (apply in order):
+- Critical: System down, data loss, security breach, complete service failure, revenue blocked
+- High:     Major feature broken, significant workflow blocked, angry/frustrated tone, business impact stated
+- Medium:   Partial issue, workaround exists, general question about broken feature
+- Low:      General question, feature request, compliment, minor inconvenience
+
+Category guidelines:
+- Billing:          Payment, invoice, charge, refund, subscription, pricing, cancel
+- Technical:        Bug, error, crash, not working, broken, performance, outage, server down
+- Feature Request:  Suggestion, would be nice, can you add, wish, enhancement, improve
+- Account:          Login, password, access, permissions, profile, 2FA
+- General:          Everything else
+
+Routing guidelines:
+- billing-team:       Billing category
+- tier2-engineering:  Technical with Critical or High urgency
+- tier1-support:      Technical with Medium or Low urgency, Account issues
+- product-team:       Feature Request
+- general-support:    General category`;
+
 /**
- * Categorize a customer support message using Groq AI
- * 
+ * Analyze a customer support ticket using Claude.
+ * Returns structured data: category, urgency, routing_team, reasoning, suggested_reply.
+ *
  * @param {string} message - The customer support message
- * @returns {Promise<{category: string, reasoning: string}>}
+ * @returns {Promise<object>} Full structured analysis result
  */
 export async function categorizeMessage(message) {
+  const now = new Date();
+  const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const dayOfWeek = days[now.getDay()];
+  const isWeekend = now.getDay() === 0 || now.getDay() === 6;
+  const submissionTime = now.toLocaleString();
+
+  const prompt = ANALYSIS_PROMPT
+    .replace('{ticket_text}', message)
+    .replace('{submission_time}', submissionTime)
+    .replace('{day_of_week}', dayOfWeek)
+    .replace('{is_weekend}', String(isWeekend));
+
   try {
-    const response = await groq.chat.completions.create({
-      model: "llama-3.3-70b-versatile",
-      messages: [
-        {
-          role: "user",
-          content: `Categorize this customer support message: ${message}`
-        }
-      ],
-      temperature: 0.7,
+    const response = await client.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 1024,
+      messages: [{ role: 'user', content: prompt }],
     });
 
-    const content = response.choices[0].message.content;
-    
-    const lines = content.split('\n');
-    let category = "Unknown";
-    let reasoning = content;
-    
-    if (content.toLowerCase().includes('billing')) {
-      category = "Billing Issue";
-    } else if (content.toLowerCase().includes('technical') || content.toLowerCase().includes('bug')) {
-      category = "Technical Problem";
-    } else if (content.toLowerCase().includes('feature')) {
-      category = "Feature Request";
-    } else if (content.toLowerCase().includes('inquiry') || content.toLowerCase().includes('question')) {
-      category = "General Inquiry";
-    }
-    
+    const raw = response.content[0].text.trim();
+    // Strip any accidental markdown fences the model might add
+    const jsonStr = raw.replace(/^```json?\n?/, '').replace(/\n?```$/, '').trim();
+    const parsed = JSON.parse(jsonStr);
+
     return {
-      category,
-      reasoning: content
+      category: parsed.category || 'General',
+      urgency: parsed.urgency || urgencyFallback(message),
+      routing_team: parsed.routing_team || 'general-support',
+      confidence: parsed.confidence ?? 0.5,
+      reasoning: parsed.reasoning?.category_reason || '',
+      urgency_reason: parsed.reasoning?.urgency_reason || '',
+      routing_reason: parsed.reasoning?.routing_reason || '',
+      suggested_reply: parsed.suggested_reply || '',
+      urgency_signals: parsed.urgency_signals || {},
     };
   } catch (error) {
-    console.warn('Groq API failed, using mock response:', error.message);
-    return getMockCategorization(message);
+    console.warn('Claude API failed, using keyword fallback:', error.message);
+    return getFallbackAnalysis(message);
   }
 }
 
 /**
- * Mock categorization for when API is unavailable
+ * Keyword-based fallback when Claude API is unavailable.
  */
-function getMockCategorization(message) {
-  const lowerMessage = message.toLowerCase();
-  
-  // Array of possible reasoning variations for each category
-  const reasoningVariations = {
-    billing: [
-      "Based on keywords related to payments and billing, this appears to be a billing-related inquiry. The customer may need assistance with account charges or payment issues.",
-      "This message contains billing terminology. The customer is likely experiencing issues with payments, invoices, or account charges.",
-      "The message references financial matters related to the customer's account. This suggests a billing or payment concern that requires attention.",
-    ],
-    technical: [
-      "This message describes technical difficulties or system errors. The customer is reporting functionality issues that may require engineering review.",
-      "Based on error-related keywords, this appears to be a technical support issue. The customer is experiencing problems with product functionality.",
-      "The message indicates a technical problem or bug. This requires investigation from the technical support team.",
-      "System-related issues are mentioned in this message. The customer needs technical assistance to resolve functionality problems.",
-    ],
-    feature: [
-      "This message suggests improvements or new functionality. The customer is providing product feedback and feature suggestions.",
-      "The customer is requesting enhancements to the product. This appears to be a feature request that should be reviewed by the product team.",
-      "Based on the language used, this seems to be a suggestion for product improvements rather than a support issue.",
-    ],
-    inquiry: [
-      "This appears to be a general question about the product or service. The customer is seeking information or clarification.",
-      "The message contains questions that don't indicate a specific problem. This is likely a general inquiry requiring informational support.",
-      "Based on the question format, this seems to be an information request rather than a technical or billing issue.",
-    ],
-    positive: [
-      "This message contains positive sentiment and appreciation. While not a support request, it may warrant acknowledgment.",
-      "The customer is expressing satisfaction or gratitude. This doesn't appear to require immediate support action.",
-    ],
-    ambiguous: [
-      "The message content is unclear or doesn't match standard support categories. Manual review may be needed for proper categorization.",
-      "This message doesn't contain clear indicators for automatic categorization. Human review recommended.",
-    ]
+function getFallbackAnalysis(message) {
+  const lower = message.toLowerCase();
+
+  let category = 'General';
+  if (/bill|payment|charge|invoice|subscription|refund|pricing|cancel/.test(lower)) {
+    category = 'Billing';
+  } else if (/bug|error|crash|not working|broken|down|outage|server|slow/.test(lower)) {
+    category = 'Technical';
+  } else if (/feature|suggest|improve|wish|enhancement|would be great|would be nice/.test(lower)) {
+    category = 'Feature Request';
+  } else if (/login|password|access|permission|account|profile|2fa/.test(lower)) {
+    category = 'Account';
+  }
+
+  const urgency = urgencyFallback(message);
+
+  const routingMap = {
+    Billing: 'billing-team',
+    Technical: urgency === 'Critical' || urgency === 'High' ? 'tier2-engineering' : 'tier1-support',
+    'Feature Request': 'product-team',
+    Account: 'tier1-support',
+    General: 'general-support',
   };
-  
-  // Helper to get random reasoning
-  const getRandomReasoning = (category) => {
-    const reasons = reasoningVariations[category];
-    return reasons[Math.floor(Math.random() * reasons.length)];
+
+  const replyMap = {
+    Billing: "Thank you for reaching out. I'm sorry to hear about the billing issue — our billing team has been notified and will contact you within 1 business day. In the meantime, you can review your invoices in the billing portal.",
+    Technical: "We apologize for the inconvenience. Our engineering team has been alerted and is investigating this issue. We'll provide an update as soon as possible.",
+    'Feature Request': "Thank you for the great suggestion! We've forwarded your feedback to our product team. We appreciate you helping us improve Relay AI.",
+    Account: "Our support team is ready to help you regain access. Please verify your identity when a team member reaches out to you.",
+    General: "Thank you for contacting Relay AI support. A team member will review your message and respond shortly.",
   };
-  
-  // Billing-related detection
-  if (lowerMessage.includes('bill') || lowerMessage.includes('payment') || 
-      lowerMessage.includes('charge') || lowerMessage.includes('invoice') ||
-      lowerMessage.includes('credit card') || lowerMessage.includes('subscription') ||
-      lowerMessage.includes('refund') || lowerMessage.includes('cancel') && lowerMessage.includes('account')) {
-    return {
-      category: "Billing Issue",
-      reasoning: getRandomReasoning('billing')
-    };
-  }
-  
-  // Technical problem detection
-  if (lowerMessage.includes('bug') || lowerMessage.includes('error') || 
-      lowerMessage.includes('broken') || lowerMessage.includes('not working') ||
-      lowerMessage.includes('crash') || lowerMessage.includes('down') || 
-      lowerMessage.includes('server') || lowerMessage.includes('loading') ||
-      lowerMessage.includes('slow') || lowerMessage.includes('issue') ||
-      lowerMessage.includes('problem') && !lowerMessage.includes('no problem')) {
-    return {
-      category: "Technical Problem",
-      reasoning: getRandomReasoning('technical')
-    };
-  }
-  
-  // Feature request detection
-  if (lowerMessage.includes('feature') || lowerMessage.includes('add') && (lowerMessage.includes('please') || lowerMessage.includes('could')) ||
-      lowerMessage.includes('improve') || lowerMessage.includes('would like to see') ||
-      lowerMessage.includes('suggestion') || lowerMessage.includes('wish') ||
-      lowerMessage.includes('could you') && lowerMessage.includes('add') ||
-      lowerMessage.includes('enhancement') || lowerMessage.includes('would be great')) {
-    return {
-      category: "Feature Request",
-      reasoning: getRandomReasoning('feature')
-    };
-  }
-  
-  // Positive feedback detection
-  if ((lowerMessage.includes('thank') || lowerMessage.includes('thanks') || lowerMessage.includes('appreciate')) &&
-      !lowerMessage.includes('but') && !lowerMessage.includes('however')) {
-    return {
-      category: "General Inquiry",
-      reasoning: getRandomReasoning('positive')
-    };
-  }
-  
-  // Question/inquiry detection
-  if (lowerMessage.includes('how') || lowerMessage.includes('what') || 
-      lowerMessage.includes('when') || lowerMessage.includes('where') ||
-      lowerMessage.includes('can i') || lowerMessage.includes('is there') ||
-      lowerMessage.includes('?')) {
-    return {
-      category: "General Inquiry",
-      reasoning: getRandomReasoning('inquiry')
-    };
-  }
-  
-  // Fallback for ambiguous messages
+
   return {
-    category: "General Inquiry",
-    reasoning: getRandomReasoning('ambiguous')
+    category,
+    urgency,
+    routing_team: routingMap[category] || 'general-support',
+    confidence: 0.6,
+    reasoning: `Fallback keyword analysis. Category detected as ${category}.`,
+    urgency_reason: 'Determined by local urgency keyword analysis (Claude API unavailable).',
+    routing_reason: `Routed to ${routingMap[category]} based on category and urgency.`,
+    suggested_reply: replyMap[category] || 'A support agent will be in touch shortly.',
+    urgency_signals: { critical_keywords_found: [], tone: 'neutral', business_impact_mentioned: false },
   };
 }
