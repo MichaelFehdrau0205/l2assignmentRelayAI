@@ -1,121 +1,115 @@
-# Customer Inbox Triage App
+# Relay AI — Customer Inbox Triage
+
+Forked from [jimenezatmit/l2assessment](https://github.com/jimenezatmit/l2assessment) and improved for the Relay AI L2 Assessment.
 
 ## Overview
 
-The Customer Inbox Triage app is a lightweight AI-powered tool that helps classify customer support messages and recommend actions. It uses Groq AI to categorize messages, applies rule-based urgency scoring, and suggests next steps based on predefined templates.
+An AI-powered customer support triage tool that categorizes, prioritizes, and routes incoming messages using a single structured Claude (Anthropic) call. It returns category, urgency, routing team, reasoning, and a ready-to-send reply draft — all in one JSON response.
 
-## Problem Statement
+## The 3 Bugs Fixed
 
-Support teams waste time manually reading and triaging customer messages. This tool provides an automated first pass at classification to help prioritize and route messages more efficiently.
+### Bug 1 — Broken LLM prompt + fragile category extraction
+The original prompt sent the raw ticket text with zero instructions. Category was extracted by checking if the word "billing" appeared anywhere in the AI's freeform response — so `"this is NOT a billing issue"` was still tagged **Billing**.
+
+**Fix:** A single Claude call with a detailed system prompt that returns structured JSON directly. No substring matching needed.
+
+### Bug 2 — Backwards urgency scorer
+The original rule-based scorer:
+- ALL CAPS → **reduced** urgency by −50 (distress signals should raise urgency)
+- Weekend submission → **reduced** urgency −20 (off-hours are more urgent, not less)
+- Question marks → **reduced** urgency −25 (questions can be critical)
+- Zero content keywords
+
+Result: `"SERVER DOWN NOW"` → Low | `"Thanks!!!"` → High
+
+**Fix:** Keyword-first scoring (critical/high/low keyword lists); ALL CAPS now correctly escalates. Primary urgency comes from Claude's JSON.
+
+### Bug 3 — Copy-paste template bug + urgency ignored
+`Feature Request` and `Technical` both routed to "Ask user to check billing portal" (identical to Billing). Urgency was completely ignored — same action regardless of severity.
+
+**Fix:** Per-category actions × 4 urgency levels (Critical/High/Medium/Low). Claude also provides a full suggested reply draft shown directly in the UI.
 
 ## Tech Stack
 
 - **Frontend**: React + Vite + Tailwind CSS
-- **AI**: Groq API (Llama 3.3 70B - Free tier)
+- **AI**: Anthropic Claude (`claude-sonnet-4-6`)
 - **Runtime**: Browser-based (local development only)
 
-## Setup Instructions
+## Setup
 
 ### Prerequisites
 
-- Node.js (v16 or higher)
-- npm or yarn
-- Groq API key (FREE - get from https://console.groq.com)
+- Node.js v16+
+- npm
+- Anthropic API key — get one at [console.anthropic.com](https://console.anthropic.com)
 
 ### Installation
 
-1. **Clone the repository**
-   ```bash
-   git clone <repository-url>
-   cd "L2 assessment"
-   ```
+```bash
+git clone https://github.com/MichaelFehdrau0205/l2assignmentRelayAI.git
+cd l2assignmentRelayAI
+npm install
+```
 
-2. **Install dependencies**
-   ```bash
-   npm install
-   ```
+### Configure API Key
 
-3. **Configure Groq API Key**
-   
-   Create a `.env.local` file in the root directory:
-   ```bash
-   cp .env.example .env.local
-   ```
-   
-   Edit `.env.local` and add your Groq API key:
-   ```
-   VITE_GROQ_API_KEY=gsk_your-actual-key-here
-   ```
-   
-   Get your FREE API key from: https://console.groq.com/keys
-   
-   **Why Groq?** Groq offers a generous free tier with fast inference and no credit card required!
+```bash
+cp .env.example .env.local
+```
 
-4. **Run the application**
-   ```bash
-   npm run dev
-   ```
-   
-   The app will be available at `http://localhost:5173`
+Edit `.env.local`:
+```
+VITE_ANTHROPIC_API_KEY=sk-ant-your-actual-key-here
+```
+
+### Run
+
+```bash
+npm run dev
+# http://localhost:5173
+```
 
 ## How It Works
 
-1. **Paste Message**: User pastes a customer support message into the text area
-2. **Analyze**: Click "Analyze Message" to process the input
-3. **Classification**: The app runs three processes in parallel:
-   - **Category Classification** (LLM): Uses Groq AI (Llama 3.3 70B) to categorize the message
-   - **Urgency Scoring** (Rule-based): Applies simple rules to determine urgency
-   - **Recommendation** (Template-based): Maps category to a recommended action
-4. **Display Results**: Shows category, urgency tag, recommended action, and AI reasoning
-5. **History**: All analyses are saved to localStorage and viewable in the History tab
-
+1. Paste a customer support message into the text area
+2. Click **Analyze Message**
+3. A single structured Claude call returns:
+   - **Category** — Billing, Technical, Feature Request, Account, General
+   - **Urgency** — Critical, High, Medium, Low
+   - **Routing Team** — billing-team, tier2-engineering, tier1-support, product-team, general-support
+   - **Confidence** score (0–1)
+   - **Reasoning** — why each decision was made, with ticket quotes
+   - **Suggested Reply** — a complete, empathetic draft the agent can send immediately
+   - **Urgency Signals** — critical keywords found, tone, business impact flag
+4. The **Recommended Agent Action** uses both category and urgency (4 levels each)
+5. All analyses are saved to localStorage and viewable in the History tab
 
 ## Example Test Messages
 
-Try analyzing these messages to see how the triage system works:
-
-### Example 1: Production Issue
+### Critical — Server outage
 ```
-Our production server is down
+OUR ENTIRE PLATFORM IS DOWN. All 200 users cannot log in. We are losing revenue every minute. This is completely unacceptable. Fix this NOW.
 ```
 
-### Example 2: Customer Feedback
+### High — Payment failure
 ```
-Hi there! I just wanted to say thank you for your amazing customer service. I've been using your product for three years now and I'm really happy with it. Keep up the great work!
-```
-
-### Example 3: Feature Request
-```
-I would love to see a dark mode option in the app. It would be much easier on my eyes during night time usage.
+I tried to update my credit card but the billing page keeps crashing. I have an invoice due tomorrow and I cannot pay it. Please help ASAP.
 ```
 
-### Example 4: Payment Issue
+### Medium — Feature question
 ```
-I tried to update my payment method but the page keeps loading forever. Is this a known issue?
-```
-
-### Example 5: Billing Question
-```
-Can I upgrade my subscription to the pro plan?
+Hi, I tried the new reporting feature but it doesn't seem to export to CSV correctly. Some columns are missing. Is there a workaround?
 ```
 
-### Example 6: Technical Support
+### Low — Feature request
 ```
-The dashboard won't load when I try to access it. I've tried refreshing but it keeps timing out.
+Love the product! When you get a chance, it would be nice to have a dark mode option. No rush — just a suggestion.
 ```
 
 ## Security Note
 
-⚠️ **Warning**: This application exposes the Groq API key in the browser (using `dangerouslyAllowBrowser: true`). This is acceptable for local development only but should **NEVER** be done in production. In a real application, API calls should be made from a secure backend server.
-
-## Why Groq?
-
-- ✅ **Completely Free** - No credit card required
-- ✅ **Fast Inference** - Groq's LPU technology is incredibly fast
-- ✅ **Generous Limits** - ~14,400 requests/day on free tier
-- ✅ **High Quality** - Llama 3.3 70B performs excellently
-- ✅ **Easy Signup** - Get started in minutes at https://console.groq.com
+This application uses `dangerouslyAllowBrowser: true` for local development only. In production, API calls should be proxied through a secure backend server — never expose API keys in the browser.
 
 ## License
 
-This project is for educational purposes only.
+Educational purposes only.
